@@ -87,6 +87,7 @@ type Defaults struct {
 	View                     string        `yaml:"view"` // "prs" | "issues" | "notifications" | "actions" | "branches"
 	Preview                  PreviewConfig `yaml:"preview"`
 	RefetchIntervalMinutes   int           `yaml:"refetchIntervalMinutes"`
+	RefetchIntervalSeconds   int           `yaml:"refetchIntervalSeconds"`
 	PRsLimit                 int           `yaml:"prsLimit"`
 	IssuesLimit              int           `yaml:"issuesLimit"`
 	NotificationsLimit       int           `yaml:"notificationsLimit"`
@@ -135,6 +136,9 @@ func (d Defaults) IncludeReadNotificationsEnabled() bool {
 // negative value disables background refreshes, preserving manual-refresh-only
 // behavior unless the user explicitly opts in.
 func (d Defaults) RefetchInterval() time.Duration {
+	if d.RefetchIntervalSeconds > 0 {
+		return time.Duration(d.RefetchIntervalSeconds) * time.Second
+	}
 	if d.RefetchIntervalMinutes <= 0 {
 		return 0
 	}
@@ -493,6 +497,12 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Keybindings.Validate(); err != nil {
 		return err
+	}
+	if c.Defaults.RefetchIntervalSeconds < 0 {
+		return fmt.Errorf("defaults.refetchIntervalSeconds = %d: want 1 or more, or 0 for off", c.Defaults.RefetchIntervalSeconds)
+	}
+	if c.Defaults.RefetchIntervalSeconds > 0 && c.Defaults.RefetchIntervalMinutes > 0 {
+		return errors.New("defaults: set refetchIntervalSeconds or refetchIntervalMinutes, not both")
 	}
 	switch c.Defaults.View {
 	case "", "prs", "issues", "notifications", "actions", "branches":

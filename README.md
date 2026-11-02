@@ -208,6 +208,7 @@ confirmQuit: false           # set true to ask before quitting with q/ctrl+c
 defaults:
   view: prs              # startup view: "prs", "issues", "notifications", "actions", or "branches"
   refetchIntervalMinutes: 0 # auto-refresh current view every N minutes (0/omitted -> manual only)
+  # refetchIntervalSeconds: 5 # or every N seconds, down to 1 (use one or the other; see "Auto-refresh")
   preview:
     open: true           # initial preview pane state (omit to default true)
     width: 84            # preview pane width in columns (0 or omit -> automatic 50/50 split)
@@ -487,6 +488,36 @@ unread/pinned-only threads. The branches view shells out to local `git` for
 configured `localRepos` (falling back to the current working directory when
 none are configured) and supports checkout, push, force-push, fast-forward,
 and delete.
+
+### Auto-refresh
+
+Auto-refresh keeps tea-dash a live pane of glass: CI runs, PR checks and your inbox
+update in place, so you don't have to press `r` or switch to the web UI while you
+wait on a run. It's off by default. Turn it on with `refetchIntervalMinutes`, or
+with `refetchIntervalSeconds` for anything down to once a second. Set one or the
+other, not both.
+
+```yaml
+defaults:
+  refetchIntervalSeconds: 5
+```
+
+Auto-refresh only touches the current view and stays out of your way: rows stay on
+screen, the selection stays on the same row, and the preview keeps its scroll
+position. If a refresh fails, the last good data stays up and the status line says
+so. A tab scrolled past its first page pauses until you press `r`, which returns to
+page one.
+
+Each refresh costs one request per tab in the current view, plus the selected row's
+detail when the preview is open, so seven tabs at one second is at least 25,000
+requests an hour. Check that your server, or anything in front of it, is happy with
+that before choosing a short interval.
+
+If the server pushes back with a 429, 502, 503 or 504, or connections start failing,
+tea-dash doubles the interval, up to once a minute, and steps back down as requests
+succeed. A `Retry-After` header is honored even when it's longer than a minute. The
+status line shows when refresh has slowed. A proxy that signals rate limits with a
+403 won't trigger this, because a missing token scope returns 403 too.
 
 ## Security
 

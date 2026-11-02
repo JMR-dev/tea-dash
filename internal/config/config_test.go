@@ -1048,3 +1048,61 @@ func TestExampleConfigParsesAndValidates(t *testing.T) {
 		t.Fatalf("example should cover all top-level views: %+v", cfg)
 	}
 }
+
+func TestDefaultsRefetchIntervalSeconds(t *testing.T) {
+	tests := []struct {
+		name     string
+		defaults Defaults
+		want     time.Duration
+	}{
+		{"one second", Defaults{RefetchIntervalSeconds: 1}, time.Second},
+		{"ninety seconds", Defaults{RefetchIntervalSeconds: 90}, 90 * time.Second},
+		{"negative is off", Defaults{RefetchIntervalSeconds: -1}, 0},
+		{"zero falls back to minutes", Defaults{RefetchIntervalMinutes: 2}, 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.defaults.RefetchInterval(); got != tt.want {
+				t.Fatalf("RefetchInterval = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnmarshalRefetchIntervalSeconds(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("defaults:\n  refetchIntervalSeconds: 5\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Defaults.RefetchIntervalSeconds != 5 {
+		t.Fatalf("RefetchIntervalSeconds = %d, want 5", c.Defaults.RefetchIntervalSeconds)
+	}
+}
+
+func TestValidateRefetchIntervals(t *testing.T) {
+	tests := []struct {
+		name     string
+		defaults Defaults
+		wantErr  string
+	}{
+		{"seconds alone", Defaults{RefetchIntervalSeconds: 1}, ""},
+		{"minutes alone", Defaults{RefetchIntervalMinutes: 1}, ""},
+		{"neither", Defaults{}, ""},
+		{"both", Defaults{RefetchIntervalSeconds: 1, RefetchIntervalMinutes: 1}, "not both"},
+		{"negative seconds", Defaults{RefetchIntervalSeconds: -1}, "refetchIntervalSeconds"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&Config{Defaults: tt.defaults}).Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate error = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}

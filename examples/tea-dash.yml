@@ -19,6 +19,7 @@ instance:
 
 defaults:
   view: prs
+  refetchIntervalSeconds: 30 # auto-refresh every 30s; backs off if the server pushes back
   prsLimit: 50
   issuesLimit: 50
   notificationsLimit: 50

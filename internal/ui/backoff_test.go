@@ -249,3 +249,43 @@ func TestManualOnlyModelIgnoresRequestStats(t *testing.T) {
 		t.Fatalf("status line = %q, want nothing about slowing", m.statusLine())
 	}
 }
+
+func TestAutoRefreshSlowsOnRealPushbackAndRecovers(t *testing.T) {
+	m, status, client := newPushbackModel(t, "")
+	m.ctx.Config.Defaults.RefetchIntervalMinutes = 0
+	m.ctx.Config.Defaults.RefetchIntervalSeconds = 1
+	if got := m.autoRefreshInterval(); got != time.Second {
+		t.Fatalf("interval = %v, want the configured 1s", got)
+	}
+
+	status.Store(http.StatusTooManyRequests)
+	for _, expected := range []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second} {
+		if _, err := client.GetPullDetail("a", "b", 1); err == nil {
+			t.Fatal("expected the request to be refused")
+		}
+		m = update(t, m, autoRefreshMsg{})
+		if got := m.autoRefreshInterval(); got != expected {
+			t.Fatalf("interval = %v, want %v", got, expected)
+		}
+	}
+	if s := m.getCurrSection(); s == nil || s.GetIsLoading() || s.GetError() != nil || s.NumRows() != 1 {
+		t.Fatal("the table should stay on screen while backing off")
+	}
+	if !strings.Contains(m.statusLine(), "refresh slowed to 8s (server busy)") {
+		t.Fatalf("status line = %q, want it to say refresh has slowed", m.statusLine())
+	}
+
+	status.Store(http.StatusOK)
+	for _, expected := range []time.Duration{4 * time.Second, 2 * time.Second, time.Second} {
+		// The fake's body isn't a real pull request, so this returns an error,
+		// but the server did answer with a 200, which is all this test needs.
+		_, _ = client.GetPullDetail("a", "b", 1)
+		m = update(t, m, autoRefreshMsg{})
+		if got := m.autoRefreshInterval(); got != expected {
+			t.Fatalf("interval = %v, want %v", got, expected)
+		}
+	}
+	if strings.Contains(m.statusLine(), "slowed") {
+		t.Fatalf("status line = %q, want it back to normal", m.statusLine())
+	}
+}

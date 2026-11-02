@@ -131,6 +131,11 @@
           "minimum": 0,
           "description": "Auto-refresh interval for the active view. 0 disables background refresh."
         },
+        "refetchIntervalSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Auto-refresh interval in seconds, down to 1. Backs off automatically if the server pushes back. Can't be combined with refetchIntervalMinutes. 0 disables it."
+        },
         "prsLimit": { "$ref": "#/$defs/nonNegativeInteger" },
         "issuesLimit": { "$ref": "#/$defs/nonNegativeInteger" },
         "notificationsLimit": { "$ref": "#/$defs/nonNegativeInteger" },

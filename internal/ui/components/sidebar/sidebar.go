@@ -65,6 +65,21 @@ func (m *Model) SetTabs(tabs []Tab) {
 	m.vp.GotoTop()
 }
 
+// UpdateTabs is SetTabs for fresher content on the same row: it keeps the scroll
+// position, clamped to the new content's length, so a background refresh doesn't
+// move what the reader is looking at.
+func (m *Model) UpdateTabs(tabs []Tab) {
+	offset := m.vp.YOffset()
+	m.tabs = compactTabs(tabs)
+	m.tab = indexOfTitle(m.tabs, m.sticky)
+	m.resize()
+	m.syncViewport()
+	m.vp.SetYOffset(offset)
+}
+
+// ScrollOffset returns the first visible line of the preview.
+func (m Model) ScrollOffset() int { return m.vp.YOffset() }
+
 // indexOfTitle returns the index of the first tab whose Title equals title, or 0
 // when there is no match (including title == "").
 func indexOfTitle(tabs []Tab, title string) int {

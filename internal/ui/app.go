@@ -95,6 +95,12 @@ type Model struct {
 	// expanded controls whether the preview shows the full body or the folded
 	// (read-more) form. Reset to false each time the preview is (re)opened.
 	expanded bool
+	// detailRefreshPending is true while a background detail fetch is in flight,
+	// so that slow responses can't pile up one request per tick.
+	detailRefreshPending bool
+	// sidebarKey is the row the preview last rendered, which tells a background
+	// update whether it's still safe to keep the scroll position.
+	sidebarKey string
 
 	// zones is the mouse hit-testing registry (layout.Zones), rebuilt from
 	// scratch exactly once per render — see rebuildZones's doc comment for
@@ -202,6 +208,7 @@ type enrichedMsg struct {
 	issue       *data.IssueDetail
 	action      *data.ActionRunDetail
 	err         error
+	background  bool // from refreshSelectedDetail rather than a row selection
 }
 
 type notificationActionMsg struct {
@@ -482,6 +489,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case context.TaskFinishedMsg:
 		delete(m.tasks, msg.TaskId)
 		cmd := m.updateSection(msg.SectionId, msg.SectionType, msg.Msg)
+		if msg.Background {
+			return m, tea.Batch(cmd, m.afterBackgroundRows(msg.SectionId, msg.SectionType))
+		}
 		if m.ctx.PreviewOpen {
 			m.syncSidebar()
 			cmd = tea.Batch(cmd, m.enrichCurrRow())
@@ -527,7 +537,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-render the current preview, which picks up the new detail when the
 		// selection still points at that row.
 		if msg.err != nil {
-			m.setEnrichErr(msg.sectionType, msg.key, msg.err)
+			// A failed background refresh keeps any detail already on screen.
+			if !msg.background || !m.hasDetail(msg.sectionType, msg.key) {
+				m.setEnrichErr(msg.sectionType, msg.key, msg.err)
+			}
 		} else {
 			if msg.pull != nil {
 				delete(m.pullEnrichErr, msg.key)
@@ -541,6 +554,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.actionEnrichErr, msg.key)
 				m.actionDetails[msg.key] = msg.action
 			}
+		}
+		if msg.background {
+			m.detailRefreshPending = false
+			m.syncSidebarKeepingScroll()
+			return m, nil
 		}
 		m.syncSidebar()
 		return m, nil
@@ -1408,25 +1426,67 @@ func (m *Model) enrichCurrRow() tea.Cmd {
 	if key == "" {
 		return nil
 	}
+	if s := m.getCurrSection(); s != nil && m.hasDetail(s.GetType(), key) {
+		return nil
+	}
+	return m.fetchCurrRowDetail(false)
+}
+
+// hasDetail reports whether a row's detail is cached.
+func (m *Model) hasDetail(sectionType, key string) bool {
+	var ok bool
+	switch sectionType {
+	case pullsection.SectionType:
+		_, ok = m.pullDetails[key]
+	case issuesection.SectionType:
+		_, ok = m.issueDetails[key]
+	case actionsection.SectionType:
+		_, ok = m.actionDetails[key]
+	}
+	return ok
+}
+
+// refreshSelectedDetail re-fetches the selected row's detail for the preview,
+// regardless of the cache, with at most one fetch in flight. The cached detail
+// stays on screen until the result replaces it.
+func (m *Model) refreshSelectedDetail() tea.Cmd {
+	if !m.ctx.PreviewOpen || m.detailRefreshPending {
+		return nil
+	}
+	cmd := m.fetchCurrRowDetail(true)
+	if cmd != nil {
+		m.detailRefreshPending = true
+	}
+	return cmd
+}
+
+// afterBackgroundRows updates the preview once a tab's background fetch lands.
+// Only the visible tab can change what the preview shows, and its detail is only
+// fetched here when it isn't cached: the tick already refreshes the selected
+// row, so fetching per result would multiply requests by the number of tabs.
+func (m *Model) afterBackgroundRows(sectionID int, sectionType string) tea.Cmd {
+	s := m.getCurrSection()
+	if !m.ctx.PreviewOpen || s == nil || s.GetId() != sectionID || s.GetType() != sectionType {
+		return nil
+	}
+	m.syncSidebarKeepingScroll()
+	key := m.selKey()
+	if key == "" || m.hasDetail(sectionType, key) {
+		return nil
+	}
+	return m.refreshSelectedDetail()
+}
+
+// fetchCurrRowDetail builds the command that loads the selected row's detail, or
+// nil when that row kind has none.
+func (m *Model) fetchCurrRowDetail(background bool) tea.Cmd {
+	key := m.selKey()
+	if key == "" {
+		return nil
+	}
 	sectionType := ""
 	if s := m.getCurrSection(); s != nil {
 		sectionType = s.GetType()
-		switch s.GetType() {
-		case pullsection.SectionType:
-			if _, ok := m.pullDetails[key]; ok {
-				return nil
-			}
-		case issuesection.SectionType:
-			if _, ok := m.issueDetails[key]; ok {
-				return nil
-			}
-		case actionsection.SectionType:
-			if _, ok := m.actionDetails[key]; ok {
-				return nil
-			}
-		default:
-			return nil
-		}
 	}
 	row := m.getCurrRowData()
 	owner, name, ok := data.SplitOwnerRepo(row.GetRepoNameWithOwner())
@@ -1443,18 +1503,18 @@ func (m *Model) enrichCurrRow() tea.Cmd {
 		return func() tea.Msg {
 			d, err := client.GetPullDetail(owner, name, index)
 			if err != nil {
-				return enrichedMsg{key: key, sectionType: pullsection.SectionType, err: err}
+				return enrichedMsg{key: key, sectionType: pullsection.SectionType, err: err, background: background}
 			}
-			return enrichedMsg{key: key, sectionType: pullsection.SectionType, pull: &d}
+			return enrichedMsg{key: key, sectionType: pullsection.SectionType, pull: &d, background: background}
 		}
 	case issuesection.SectionType:
 		index := row.GetNumber()
 		return func() tea.Msg {
 			d, err := client.GetIssueDetail(owner, name, index)
 			if err != nil {
-				return enrichedMsg{key: key, sectionType: issuesection.SectionType, err: err}
+				return enrichedMsg{key: key, sectionType: issuesection.SectionType, err: err, background: background}
 			}
-			return enrichedMsg{key: key, sectionType: issuesection.SectionType, issue: &d}
+			return enrichedMsg{key: key, sectionType: issuesection.SectionType, issue: &d, background: background}
 		}
 	case actionsection.SectionType:
 		run, ok := row.(data.ActionRun)
@@ -1468,16 +1528,17 @@ func (m *Model) enrichCurrRow() tea.Cmd {
 		return func() tea.Msg {
 			d, err := client.GetActionRun(stdctx.Background(), owner, name, runID)
 			if err != nil {
-				return enrichedMsg{key: key, sectionType: actionsection.SectionType, err: err}
+				return enrichedMsg{key: key, sectionType: actionsection.SectionType, err: err, background: background}
 			}
 			jobs, err := client.ListActionJobs(stdctx.Background(), owner, name, runID)
 			if err != nil {
-				return enrichedMsg{key: key, sectionType: actionsection.SectionType, err: err}
+				return enrichedMsg{key: key, sectionType: actionsection.SectionType, err: err, background: background}
 			}
 			return enrichedMsg{
 				key:         key,
 				sectionType: actionsection.SectionType,
 				action:      &data.ActionRunDetail{Run: d, Jobs: jobs},
+				background:  background,
 			}
 		}
 	default:
@@ -1489,9 +1550,28 @@ func (m *Model) enrichCurrRow() tea.Cmd {
 // preview pane. The concrete row type selects the renderer; a missing cache
 // entry renders that row kind's loading placeholder.
 func (m *Model) syncSidebar() {
+	m.renderSidebar(m.sidebar.SetTabs)
+}
+
+// syncSidebarKeepingScroll re-renders fresher content for the same row without
+// moving the reader. If the selected row has changed it behaves like syncSidebar.
+func (m *Model) syncSidebarKeepingScroll() {
+	if m.selKey() != m.sidebarKey {
+		m.syncSidebar()
+		return
+	}
+	m.renderSidebar(m.sidebar.UpdateTabs)
+}
+
+// renderSidebar renders the current row into the preview through setTabs.
+func (m *Model) renderSidebar(setTabs func([]sidebar.Tab)) {
+	setContent := func(content string) {
+		setTabs([]sidebar.Tab{{Title: "Overview", Content: content}})
+	}
+	m.sidebarKey = m.selKey()
 	row := m.getCurrRowData()
 	if row == nil {
-		m.sidebar.SetContent("")
+		setContent("")
 		return
 	}
 	key := m.selKey()
@@ -1500,32 +1580,32 @@ func (m *Model) syncSidebar() {
 	switch r := row.(type) {
 	case data.PullRequest:
 		if err := m.pullEnrichErr[key]; err != nil {
-			m.sidebar.SetContent(m.failedPreview(row, err))
+			setContent(m.failedPreview(row, err))
 			return
 		}
-		m.sidebar.SetTabs(sidebarTabs(prview.RenderPullTabs(r, m.pullDetails[key], w, m.expanded, m.ctx.Styles, m.ctx.Icons)))
+		setTabs(sidebarTabs(prview.RenderPullTabs(r, m.pullDetails[key], w, m.expanded, m.ctx.Styles, m.ctx.Icons)))
 		return
 	case data.Issue:
 		if err := m.issueEnrichErr[key]; err != nil {
-			m.sidebar.SetContent(m.failedPreview(row, err))
+			setContent(m.failedPreview(row, err))
 			return
 		}
-		m.sidebar.SetTabs(sidebarTabs(prview.RenderIssueTabs(r, m.issueDetails[key], w, m.expanded, m.ctx.Styles, m.ctx.Icons)))
+		setTabs(sidebarTabs(prview.RenderIssueTabs(r, m.issueDetails[key], w, m.expanded, m.ctx.Styles, m.ctx.Icons)))
 		return
 	case data.Notification:
 		rendered = prview.RenderNotification(r, w, m.ctx.Styles, m.ctx.Icons)
 	case data.ActionRun:
 		if err := m.actionEnrichErr[key]; err != nil {
-			m.sidebar.SetContent(m.failedPreview(row, err))
+			setContent(m.failedPreview(row, err))
 			return
 		}
-		m.sidebar.SetTabs(sidebarTabs(prview.RenderActionTabs(r, m.actionDetails[key], w, m.ctx.Styles, m.ctx.Icons)))
+		setTabs(sidebarTabs(prview.RenderActionTabs(r, m.actionDetails[key], w, m.ctx.Styles, m.ctx.Icons)))
 		return
 	default:
-		m.sidebar.SetContent("")
+		setContent("")
 		return
 	}
-	m.sidebar.SetContent(rendered)
+	setContent(rendered)
 }
 
 func sidebarTabs(tabs []prview.Tab) []sidebar.Tab {
@@ -2080,10 +2160,32 @@ func (m Model) handleAutoRefresh() (Model, tea.Cmd) {
 	if s := m.getCurrSection(); s != nil && s.IsSearchFocused() {
 		return m, tea.Batch(cmds...)
 	}
+	// Details other than the selected row's go stale unseen, so drop them and let
+	// selecting a row fetch it fresh. With the preview closed nothing shows them.
+	selected := ""
+	if m.ctx.PreviewOpen {
+		selected = m.selKey()
+	}
+	keepOnlyKey(m.pullDetails, selected)
+	keepOnlyKey(m.issueDetails, selected)
+	keepOnlyKey(m.actionDetails, selected)
+	keepOnlyKey(m.pullEnrichErr, selected)
+	keepOnlyKey(m.issueEnrichErr, selected)
+	keepOnlyKey(m.actionEnrichErr, selected)
 	for _, s := range m.currentViewSections() {
 		cmds = append(cmds, s.RefreshRows())
 	}
+	cmds = append(cmds, m.refreshSelectedDetail())
 	return m, tea.Batch(cmds...)
+}
+
+// keepOnlyKey removes every entry except key.
+func keepOnlyKey[V any](entries map[string]V, key string) {
+	for k := range entries {
+		if k != key {
+			delete(entries, k)
+		}
+	}
 }
 
 func (m *Model) startAction(kind actions.Kind) tea.Cmd {

@@ -428,3 +428,58 @@ func TestSelectTabRecordsSticky(t *testing.T) {
 		t.Fatalf("redundant SelectTab should record sticky, got %q, want Overview", got)
 	}
 }
+
+func TestUpdateTabsKeepsScrollPosition(t *testing.T) {
+	ctx := &context.ProgramContext{
+		Styles:        context.DefaultStyles(),
+		PreviewOpen:   true,
+		PreviewWidth:  40,
+		PreviewHeight: 8,
+	}
+	m := New(ctx)
+	m.SetTabs([]Tab{{Title: "Overview", Content: longContent(200)}})
+	m.vp.SetYOffset(50)
+
+	m.UpdateTabs([]Tab{{Title: "Overview", Content: longContent(201)}})
+
+	if got := m.ScrollOffset(); got != 50 {
+		t.Fatalf("ScrollOffset = %d, want 50", got)
+	}
+}
+
+func TestUpdateTabsClampsWhenContentShrinks(t *testing.T) {
+	ctx := &context.ProgramContext{
+		Styles:        context.DefaultStyles(),
+		PreviewOpen:   true,
+		PreviewWidth:  40,
+		PreviewHeight: 8,
+	}
+	m := New(ctx)
+	m.SetTabs([]Tab{{Title: "Overview", Content: longContent(200)}})
+	m.vp.SetYOffset(150)
+
+	m.UpdateTabs([]Tab{{Title: "Overview", Content: longContent(10)}})
+
+	if got := m.ScrollOffset(); got >= 150 {
+		t.Fatalf("ScrollOffset = %d, want clamped to the shorter content", got)
+	}
+}
+
+func TestUpdateTabsKeepsTheStickyTab(t *testing.T) {
+	ctx := &context.ProgramContext{
+		Styles:        context.DefaultStyles(),
+		PreviewOpen:   true,
+		PreviewWidth:  40,
+		PreviewHeight: 8,
+	}
+	m := New(ctx)
+	tabs := []Tab{{Title: "Overview", Content: "a"}, {Title: "Checks", Content: "b"}}
+	m.SetTabs(tabs)
+	m.NextTab()
+
+	m.UpdateTabs(tabs)
+
+	if got := m.CurrentTabTitle(); got != "Checks" {
+		t.Fatalf("CurrentTabTitle = %q, want Checks", got)
+	}
+}

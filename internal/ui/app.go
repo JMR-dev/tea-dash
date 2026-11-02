@@ -101,6 +101,8 @@ type Model struct {
 	// sidebarKey is the row the preview last rendered, which tells a background
 	// update whether it's still safe to keep the scroll position.
 	sidebarKey string
+	// backoff slows auto-refresh while the server is pushing back.
+	backoff refreshBackoff
 
 	// zones is the mouse hit-testing registry (layout.Zones), rebuilt from
 	// scratch exactly once per render — see rebuildZones's doc comment for
@@ -439,11 +441,22 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) autoRefreshInterval() time.Duration {
+// configuredRefreshInterval is the interval asked for in the config, before any
+// backoff. Zero means auto-refresh is off.
+func (m Model) configuredRefreshInterval() time.Duration {
 	if m.ctx == nil || m.ctx.Config == nil {
 		return 0
 	}
 	return m.ctx.Config.Defaults.RefetchInterval()
+}
+
+// autoRefreshInterval is how long until the next tick, including any backoff.
+func (m Model) autoRefreshInterval() time.Duration {
+	base := m.configuredRefreshInterval()
+	if base <= 0 {
+		return 0
+	}
+	return m.backoff.wait(base)
 }
 
 func (m Model) autoRefreshCmd() tea.Cmd {
@@ -2150,10 +2163,20 @@ func (m Model) toggleSmartFiltering() (Model, tea.Cmd) {
 }
 
 func (m Model) handleAutoRefresh() (Model, tea.Cmd) {
-	if m.autoRefreshInterval() <= 0 {
+	base := m.configuredRefreshInterval()
+	if base <= 0 {
 		return m, nil
 	}
+	var stats gitea.RequestStats
+	if m.ctx.Client != nil {
+		stats = m.ctx.Client.TakeRequestStats()
+	}
+	m.backoff.observe(base, stats)
 	cmds := []tea.Cmd{m.autoRefreshCmd()}
+	// The server has just asked for a pause, so this tick only reschedules.
+	if stats.RetryAfter > 0 {
+		return m, tea.Batch(cmds...)
+	}
 	if m.actionPrompt.Active() {
 		return m, tea.Batch(cmds...)
 	}
@@ -3885,7 +3908,9 @@ func (m Model) statusLine() string {
 		return "Loading " + title + "…"
 	}
 	line := rowCountText(s)
-	if err := s.GetRefreshError(); err != nil {
+	if interval := m.autoRefreshInterval(); interval > m.configuredRefreshInterval() {
+		line += fmt.Sprintf(" · refresh slowed to %s (server busy)", interval)
+	} else if err := s.GetRefreshError(); err != nil {
 		line += " · last refresh failed: " + refreshFailureText(err)
 	} else if m.autoRefreshInterval() > 0 && s.AutoRefreshPaused() {
 		line += " · auto-refresh paused past page 1 (r to refresh)"

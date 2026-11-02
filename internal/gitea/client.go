@@ -25,6 +25,7 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	requests   *pushbackTransport
 	me         string
 
 	// sdkMu serializes typed SDK calls through one wrapper point. The SDK itself
@@ -61,9 +62,10 @@ func NewClient(ctx context.Context, cfg auth.Config) (*Client, error) {
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = tlsCfg
+	requests := &pushbackTransport{next: tr}
 	hc := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: tr,
+		Transport: requests,
 	}
 
 	client, err := sdk.NewClient(cfg.URL,
@@ -85,6 +87,7 @@ func NewClient(ctx context.Context, cfg auth.Config) (*Client, error) {
 		baseURL:    cfg.URL,
 		token:      cfg.Token,
 		httpClient: hc,
+		requests:   requests,
 		me:         me.UserName,
 	}, nil
 }

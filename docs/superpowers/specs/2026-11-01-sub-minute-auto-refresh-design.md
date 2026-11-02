@@ -70,8 +70,9 @@ Intervals of a minute or more are unchanged.
 - A change takes effect from the next tick, a lag of one interval.
 
 `Retry-After`, in seconds or as an HTTP-date, sets a minimum for the next wait. It's honored even past
-60s because it's an explicit server instruction, then the normal schedule resumes. The status line
-shows when refresh is slowed, and manual `r` still works.
+60s because it's an explicit server instruction, then the normal schedule resumes. A tick that sees
+it sends no requests and only reschedules. The status line shows when refresh is slowed, and manual
+`r` still works.
 
 ## Cost
 

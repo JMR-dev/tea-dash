@@ -2080,7 +2080,9 @@ func (m Model) handleAutoRefresh() (Model, tea.Cmd) {
 	if s := m.getCurrSection(); s != nil && s.IsSearchFocused() {
 		return m, tea.Batch(cmds...)
 	}
-	cmds = append(cmds, m.refreshAllSections())
+	for _, s := range m.currentViewSections() {
+		cmds = append(cmds, s.RefreshRows())
+	}
 	return m, tea.Batch(cmds...)
 }
 
@@ -3780,6 +3782,29 @@ func (m Model) statusLine() string {
 		}
 		return "Loading " + title + "…"
 	}
+	line := rowCountText(s)
+	if err := s.GetRefreshError(); err != nil {
+		line += " · last refresh failed: " + refreshFailureText(err)
+	} else if m.autoRefreshInterval() > 0 && s.AutoRefreshPaused() {
+		line += " · auto-refresh paused past page 1 (r to refresh)"
+	}
+	return line
+}
+
+// refreshFailureText reduces an error to one short line for the status bar.
+// SDK errors can carry the whole request and response body after the first line.
+func refreshFailureText(err error) string {
+	const maxRunes = 60
+	text, _, _ := strings.Cut(err.Error(), "\n")
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return string(runes)
+}
+
+// rowCountText describes how many rows a section shows.
+func rowCountText(s section.Section) string {
 	total := s.GetTotalCount()
 	shown := s.NumRows()
 	if total > shown {

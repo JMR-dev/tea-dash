@@ -9,4 +9,7 @@ type TaskFinishedMsg struct {
 	SectionType string
 	TaskId      string
 	Msg         tea.Msg
+	// Background marks the result of a quiet auto-refresh, as opposed to a
+	// fetch the user can see in progress.
+	Background bool
 }

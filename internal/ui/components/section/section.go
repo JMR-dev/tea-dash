@@ -32,6 +32,9 @@ type Section interface {
 	GetCurrRow() data.RowData
 	SelectRow(index int)
 	FetchRows() tea.Cmd
+	RefreshRows() tea.Cmd
+	AutoRefreshPaused() bool
+	GetRefreshError() error
 	MaybeFetchNextPage() tea.Cmd
 
 	GetItemSingular() string

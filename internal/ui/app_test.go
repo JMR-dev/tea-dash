@@ -2,6 +2,7 @@ package ui
 
 import (
 	stdctx "context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1833,11 +1834,105 @@ func TestAutoRefreshTickRefreshesCurrentViewAndReschedules(t *testing.T) {
 	if got := m.autoRefreshInterval(); got != time.Minute {
 		t.Fatalf("auto-refresh interval = %v, want 1m", got)
 	}
-	if s := m.getCurrSection(); s == nil || !s.GetIsLoading() {
-		t.Fatal("auto-refresh tick should mark current view sections loading")
+	if s := m.getCurrSection(); s == nil || s.GetIsLoading() {
+		t.Fatal("auto-refresh tick should leave the table on screen, not enter the loading state")
 	}
-	if len(m.tasks) == 0 {
-		t.Fatal("auto-refresh tick should register fetch tasks")
+	if len(m.tasks) != 0 {
+		t.Fatalf("auto-refresh tick registered %d tasks, want none", len(m.tasks))
+	}
+}
+
+func TestAutoRefreshTickLeavesViewUnchanged(t *testing.T) {
+	m := New(&config.Config{Defaults: config.Defaults{RefetchIntervalMinutes: 1}}, nil)
+	m = update(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(t, m, fetchedMsg([]data.PullRequest{{
+		Number: 1, Title: "First", RepoNameWithOwner: "gitea/tea", Author: "me", State: "open",
+	}}))
+	before := m.statusLine()
+
+	m = update(t, m, autoRefreshMsg{})
+
+	if got := m.statusLine(); got != before {
+		t.Fatalf("status line = %q, want it unchanged at %q", got, before)
+	}
+}
+
+func TestManualRefreshStillShowsLoading(t *testing.T) {
+	m := New(&config.Config{Defaults: config.Defaults{RefetchIntervalMinutes: 1}}, nil)
+	m = update(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(t, m, fetchedMsg([]data.PullRequest{{
+		Number: 1, Title: "First", RepoNameWithOwner: "gitea/tea", Author: "me", State: "open",
+	}}))
+
+	m = pressRunes(t, m, "R")
+
+	if s := m.getCurrSection(); s == nil || !s.GetIsLoading() {
+		t.Fatal("a manual refresh should still show its loading state")
+	}
+}
+
+func TestStatusLineReportsFailedBackgroundRefreshBriefly(t *testing.T) {
+	m := New(&config.Config{Defaults: config.Defaults{RefetchIntervalMinutes: 1}}, nil)
+	m = update(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	rows := []data.PullRequest{{
+		Number: 1, Title: "First", RepoNameWithOwner: "gitea/tea", Author: "me", State: "open",
+	}}
+	m = update(t, m, fetchedMsg(rows))
+
+	failure := errors.New("429 Too Many Requests\nRequest: '/api/v1/repos' with 'GET' method and a long body " + strings.Repeat("x", 200))
+	m = update(t, m, context.TaskFinishedMsg{
+		SectionId: 0, SectionType: pullsection.SectionType, Background: true,
+		Msg: pullsection.SectionPullRequestsFetchedMsg{Err: failure, Background: true, Page: 1},
+	})
+
+	status := m.statusLine()
+	if !strings.Contains(status, "1 pull request") || !strings.Contains(status, "last refresh failed: 429 Too Many Requests") {
+		t.Fatalf("status line = %q, want the row count and the failure", status)
+	}
+	if strings.Contains(status, "Request:") || strings.Contains(status, "\n") {
+		t.Fatalf("status line = %q, want only the first line of the error", status)
+	}
+	if s := m.getCurrSection(); s == nil || s.GetError() != nil || s.NumRows() != 1 {
+		t.Fatal("a failed background refresh should keep the table on screen")
+	}
+}
+
+func TestStatusLineTruncatesLongRefreshFailure(t *testing.T) {
+	got := refreshFailureText(errors.New(strings.Repeat("x", 300)))
+	if n := len([]rune(got)); n > 80 {
+		t.Fatalf("failure text is %d runes long: %q", n, got)
+	}
+}
+
+func TestStatusLineSaysWhenAPagedInTabIsPaused(t *testing.T) {
+	tests := []struct {
+		name       string
+		defaults   config.Defaults
+		wantPaused bool
+	}{
+		{"auto-refresh on", config.Defaults{RefetchIntervalMinutes: 1}, true},
+		{"auto-refresh off", config.Defaults{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := New(&config.Config{Defaults: tt.defaults}, nil)
+			m = update(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+			m = update(t, m, fetchedMsg([]data.PullRequest{{
+				Number: 1, Title: "First", RepoNameWithOwner: "gitea/tea", Author: "me", State: "open",
+			}}))
+			m = update(t, m, context.TaskFinishedMsg{
+				SectionId: 0, SectionType: pullsection.SectionType,
+				Msg: pullsection.SectionPullRequestsFetchedMsg{
+					Rows:       []data.PullRequest{{Number: 2, Title: "Second", RepoNameWithOwner: "gitea/tea"}},
+					TotalCount: 3, Page: 2, Append: true,
+				},
+			})
+
+			got := strings.Contains(m.statusLine(), "auto-refresh paused")
+			if got != tt.wantPaused {
+				t.Fatalf("status line = %q, want paused = %v", m.statusLine(), tt.wantPaused)
+			}
+		})
 	}
 }
 

@@ -26,6 +26,8 @@ type RowsFetchedMsg[T data.RowData] struct {
 	Page       int
 	Append     bool
 	Err        error
+	// Background marks the result of RefreshRows.
+	Background bool
 }
 
 // Options parameterizes New, carrying the four per-type seams (fetch, row
@@ -67,6 +69,9 @@ type Model[T data.RowData] struct {
 	page             int
 	loadingMore      bool
 	pageable         bool
+	refreshing       bool  // a RefreshRows fetch is in flight
+	loaded           bool  // a fetch has succeeded at least once
+	refreshErr       error // the last RefreshRows failure, cleared by a success
 }
 
 // compile-time interface assertions
@@ -162,9 +167,53 @@ func (m *Model[T]) MaybeFetchNextPage() tea.Cmd {
 	return m.fetchPage(nextPage, true)
 }
 
+// RefreshRows quietly re-fetches the first page for auto-refresh: rows stay on
+// screen, keys keep working, and no task or spinner starts. It returns nil when
+// a refresh would interfere with something else: a fetch already in flight,
+// more rows loading, a focused search, or a reader past page one, whose
+// position a first-page result would throw away.
+func (m *Model[T]) RefreshRows() tea.Cmd {
+	if m.GetIsLoading() || m.refreshing || m.loadingMore || m.IsSearchFocused() || m.AutoRefreshPaused() {
+		return nil
+	}
+	taskId := fmt.Sprintf("refresh-%s-%d-%d", m.GetType(), m.GetId(), time.Now().UnixNano())
+	m.SetLastFetchID(taskId)
+	m.refreshing = true
+	client := m.Ctx.Client
+	id, sType := m.GetId(), m.GetType()
+	f := m.Config.Filter.WithDefaults(m.filterKind)
+	limit := m.Config.Limit
+	if limit == 0 && m.Ctx.Config != nil {
+		limit = m.limitFn(m.Ctx.Config)
+	}
+	return func() tea.Msg {
+		ctx, cancel := stdctx.WithTimeout(stdctx.Background(), fetchTimeout)
+		defer cancel()
+		rows, total, err := m.fetch(ctx, client, f, limit, 1)
+		return appctx.TaskFinishedMsg{
+			SectionId: id, SectionType: sType, TaskId: taskId, Background: true,
+			Msg: RowsFetchedMsg[T]{
+				Rows: rows, TotalCount: total, TaskId: taskId,
+				Page: 1, Err: err, Background: true,
+			},
+		}
+	}
+}
+
+// AutoRefreshPaused reports whether RefreshRows is holding off because the
+// reader has loaded rows past the first page.
+func (m *Model[T]) AutoRefreshPaused() bool { return m.page > 1 }
+
+// GetRefreshError returns the last background refresh failure, which leaves
+// the last good rows on screen. A successful fetch clears it.
+func (m *Model[T]) GetRefreshError() error { return m.refreshErr }
+
 func (m *Model[T]) fetchPage(page int, appendRows bool) tea.Cmd {
 	taskId := fmt.Sprintf("fetch-%s-%d-%d", m.GetType(), m.GetId(), time.Now().UnixNano())
 	m.SetLastFetchID(taskId)
+	// This fetch supersedes any refresh in flight, whose result will be dropped
+	// by the stale-fetch guard and so can't clear this flag itself.
+	m.refreshing = false
 	if appendRows {
 		m.loadingMore = true
 	} else {
@@ -222,15 +271,23 @@ func (m *Model[T]) Update(msg tea.Msg) (Section, tea.Cmd) {
 		if m.LastFetchID() != "" && m.LastFetchID() != msg.TaskId {
 			return m, nil // stale/superseded fetch
 		}
-		if msg.Append {
+		if msg.Background {
+			m.refreshing = false
+		} else if msg.Append {
 			m.loadingMore = false
 		} else {
 			m.SetIsLoading(false)
 		}
 		if msg.Err != nil {
+			if msg.Background && m.loaded {
+				m.refreshErr = msg.Err
+				return m, nil
+			}
 			m.SetError(msg.Err)
 			return m, nil
 		}
+		m.loaded = true
+		m.refreshErr = nil
 		if msg.Append {
 			m.rows = append(m.rows, msg.Rows...)
 		} else {

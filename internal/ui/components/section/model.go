@@ -200,6 +200,34 @@ func (m *Model[T]) RefreshRows() tea.Cmd {
 	}
 }
 
+// rowIdentity names a row independently of its position and of fields that can
+// change between fetches. Rows with no number, such as branches and some
+// notifications, fall back to their title.
+func rowIdentity(row data.RowData) string {
+	if n := row.GetNumber(); n != 0 {
+		return fmt.Sprintf("%s#%d", row.GetRepoNameWithOwner(), n)
+	}
+	return row.GetRepoNameWithOwner() + "\x00" + row.GetTitle()
+}
+
+// restoreSelection moves the cursor back to the row named by identity after a
+// background refresh, so that a new row arriving above it can't silently point
+// an action at a different row. If that row is gone, the clamped cursor stays,
+// except that a cursor stranded by an empty list returns to the first row.
+func (m *Model[T]) restoreSelection(identity string) {
+	if identity != "" {
+		for i := range m.rows {
+			if rowIdentity(m.rows[i]) == identity {
+				m.SelectRow(i)
+				return
+			}
+		}
+	}
+	if m.CurrRow() < 0 && len(m.rows) > 0 {
+		m.SelectRow(0)
+	}
+}
+
 // AutoRefreshPaused reports whether RefreshRows is holding off because the
 // reader has loaded rows past the first page.
 func (m *Model[T]) AutoRefreshPaused() bool { return m.page > 1 }
@@ -288,6 +316,10 @@ func (m *Model[T]) Update(msg tea.Msg) (Section, tea.Cmd) {
 		}
 		m.loaded = true
 		m.refreshErr = nil
+		selected := ""
+		if row := m.GetCurrRow(); msg.Background && row != nil {
+			selected = rowIdentity(row)
+		}
 		if msg.Append {
 			m.rows = append(m.rows, msg.Rows...)
 		} else {
@@ -304,6 +336,9 @@ func (m *Model[T]) Update(msg tea.Msg) (Section, tea.Cmd) {
 		// selected row (intentional: preserves the user's position rather than
 		// jumping to the top).
 		m.SetRows(m.BuildRows())
+		if msg.Background {
+			m.restoreSelection(selected)
+		}
 		return m, nil
 	case spinner.TickMsg:
 		if m.GetIsLoading() {
